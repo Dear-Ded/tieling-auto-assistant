@@ -1,0 +1,113 @@
+{
+  "name": "tieling-butler",
+  "version": "1.0.0",
+  "description": "One-sentence fully-automated personal assistant team. System ops, content creation, research, coding, file processing, data analysis — all self-executing. 12 AI characters with 3 switchable personality styles. Self-learning and self-evolving. Triggered by help me / auto / generate / create / install / clean / schedule / remind / write / search / analyze.",
+  "author": {
+    "name": "爹 (Dear-Ded)",
+    "email": ""
+  },
+  "agents": [
+    "./agents/tieling-butler-team-lead.md",
+    "./agents/tieling-butler-sys.md",
+    "./agents/tieling-butler-content.md",
+    "./agents/tieling-butler-info.md",
+    "./agents/tieling-butler-code.md",
+    "./agents/tieling-butler-safety.md",
+    "./agents/tieling-butler-data.md"
+  ],
+
+  "expertType": "team",
+  "agentName": "tieling-butler-team-lead",
+  "teamInfo": {
+    "leadAgent": "tieling-butler-team-lead",
+    "memberAgents": [
+      "tieling-butler-sys",
+      "tieling-butler-content",
+      "tieling-butler-info",
+      "tieling-butler-code",
+      "tieling-butler-safety",
+      "tieling-butler-data"
+    ]
+  },
+
+  "displayName": {
+    "en": "Tieling AI Butler",
+    "zh": "铁岭AI总管"
+  },
+  "profession": {
+    "en": "Tieling AI Butler",
+    "zh": "铁岭AI总管"
+  },
+  "displayDescription": {
+    "en": "One-sentence personal assistant. System ops, content, code, research — all auto. 6 biz roles in abstract internet celeb style.",
+    "zh": "一句话全自动个人助理，系统运维、内容创作、代码、情报、安全全覆盖。12角色抽象名人堂风格。"
+  },
+  "avatar": "avatars/team.png",
+  "categoryId": "10-ProjectQuality",
+  "defaultInitPrompt": {
+    "zh": "帮我清理电脑，整理一下文件。",
+    "en": "Help me clean up my computer and organize files."
+  },
+  "plugin": "tieling-butler",
+  "tags": [
+    { "en": "Personal Assistant", "zh": "个人助理" },
+    { "en": "Automation", "zh": "自动化" },
+    { "en": "Full Scenario", "zh": "全场景" }
+  ],
+  "quickPrompts": [
+    { "en": "Help me clean up my computer and organize files.", "zh": "帮我清理电脑，整理一下文件。" },
+    { "en": "Write a WeChat article about AI industry trends with illustrations.", "zh": "帮我写一篇关于AI行业趋势的公众号文章并配图。" },
+    { "en": "Search for the latest tools and install useful ones for me.", "zh": "搜索最新好用的AI工具，帮我装上。" }
+  ],
+  "members": [
+    {
+      "id": "tieling-butler-team-lead",
+      "displayName": { "en": "Qian Shouzheng (Uncle Coat)", "zh": "钱守正 (大衣哥)" },
+      "profession": { "en": "General Manager", "zh": "总经理" },
+      "avatar": "avatars/tieling-butler-team-lead.png",
+      "role": "lead"
+    },
+    {
+      "id": "tieling-butler-sys",
+      "displayName": { "en": "Wang Jingze", "zh": "王境泽" },
+      "profession": { "en": "System Ops", "zh": "系统运维" },
+      "avatar": "avatars/tieling-butler-sys.png",
+      "role": "member"
+    },
+    {
+      "id": "tieling-butler-content",
+      "displayName": { "en": "Sister Guo", "zh": "迷人的郭老师" },
+      "profession": { "en": "Content Creator", "zh": "内容创作" },
+      "avatar": "avatars/tieling-butler-content.png",
+      "role": "member"
+    },
+    {
+      "id": "tieling-butler-info",
+      "displayName": { "en": "Fan Xiaoqin", "zh": "范小勤" },
+      "profession": { "en": "Info Hunter", "zh": "信息搜集" },
+      "avatar": "avatars/tieling-butler-info.png",
+      "role": "member"
+    },
+    {
+      "id": "tieling-butler-code",
+      "displayName": { "en": "Brother Giao", "zh": "giao哥" },
+      "profession": { "en": "Code Tech", "zh": "代码实现" },
+      "avatar": "avatars/tieling-butler-code.png",
+      "role": "member"
+    },
+    {
+      "id": "tieling-butler-safety",
+      "displayName": { "en": "Cai Xukun", "zh": "蔡徐坤" },
+      "profession": { "en": "Safety Sentinel", "zh": "安全哨兵" },
+      "avatar": "avatars/tieling-butler-safety.png",
+      "role": "member"
+    },
+    {
+      "id": "tieling-butler-data",
+      "displayName": { "en": "Brother Dao", "zh": "刀哥" },
+      "profession": { "en": "Data Keeper", "zh": "数据保管" },
+      "avatar": "avatars/tieling-butler-data.png",
+      "role": "member"
+    }
+  ]
+}
