@@ -1,84 +1,176 @@
 #!/usr/bin/env python3
 """
-adapters/qyyjt_adapter.py — v1.1.0 企业预警通数据适配器
+adapters/qyyjt_adapter.py — v1.1.0 企业预警通全功能适配器
 
-华尔街驻铁岭办事处 · 企业预警通 (qyyjt.cn) 集成
+华尔街驻铁岭办事处 · qyyjt.cn 全面集成
 
-三层次数据获取策略:
-  Layer 1 (公开): WebSearch + WebFetch 抓取公开可见数据, 零依赖
-  Layer 2 (账号): Selenium 模拟登录 → 提取 token → 调用内部 API
-  Layer 3 (替代): 阿里云API市场 / 腾讯云 企业风险API 兜底
+数据获取四层策略:
+  Layer 0: 公开页面 WebSearch → 不登录也能拿的基础信息
+  Layer 1: 新版 REST API (finchinaAPP/v1/) → 多重搜索 + 债券/公告
+  Layer 2: 旧版内部 API (getData.action) → 区域经济 + dataId模块
+  Layer 3: 第三方替代API → 阿里云/腾讯云兜底
 
 参考来源:
-  - DanCheng2021/crawl-python (qyyjt.cn 爬虫)
-  - YukidokeAzarea/QYYJTScraper (债券公告爬虫)
+  - DanCheng2021/crawl-python: 旧版API (dataId=154/486)
+  - YukidokeAzarea/QYYJTScraper: 新版REST API (multipleSearch/F9公告)
+  - caifuhao.eastmoney.com: 产品功能全图
 """
 
 from __future__ import annotations
 
-import json
 import hashlib
-import time
+import json
+import logging
+import random
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from enum import Enum
+
+logger = logging.getLogger("qyyjt")
 
 
 # ═══════════════════════════════════════════════════════════════
-# 数据模块枚举 — 企业预警通 internal API dataId 映射
+# 数据模块 — 企业预警通全部功能映射
 # ═══════════════════════════════════════════════════════════════
 
 class QYJTModule(Enum):
-    """企业预警通内部 dataId → 数据模块映射"""
+    """企业预警通功能模块 — 按产品功能全图组织"""
 
-    # 企业基础
-    ENTERPRISE_BASIC = "101"        # 企业基本信息
-    ENTERPRISE_PROFILE = "102"      # 企业画像/全景
-    SHAREHOLDER_INFO = "103"        # 股东信息
-    BRANCH_INFO = "104"             # 分支机构
+    # ── 新版 REST API (finchinaAPP/v1/) ──
+    SEARCH_MULTI = "search_multi"        # 企业/证券/综合搜索
+    BOND_NOTICE = "bond_notice"          # 债券公告列表 (F9深度资料)
 
-    # 风险预警
-    RISK_SCAN = "201"               # 企业风险扫描(综合)
-    COURT_RECORDS = "202"           # 司法涉诉
-    ADMIN_PENALTY = "203"           # 行政处罚
-    CREDIT_RISK = "204"             # 信用风险(失信/限消)
-    TAX_RISK = "205"                # 税务风险
+    # ── 企业尽调 ──
+    ENTERPRISE_BASIC = "ent_basic"       # 工商信息
+    ENTERPRISE_CREDIT = "ent_credit"     # 信用报告
+    ENTERPRISE_PENALTY = "ent_penalty"   # 行政处罚
+    ENTERPRISE_FINANCING = "ent_finance" # 融资信息
+    ENTERPRISE_CHANGE = "ent_change"     # 工商变更
 
-    # 舆情
-    NEWS_NEGATIVE = "301"           # 负面舆情
-    NEWS_ALL = "302"                # 全部新闻
-    PUBLIC_OPINION = "303"          # 舆情分析
+    # ── 风险扫描 ──
+    RISK_SCAN = "risk_scan"             # 企业风险扫描(综合)
+    RISK_SIGNAL = "risk_signal"         # 风险信号详情(等级/标签/摘要)
+    COURT_CASES = "court_cases"         # 裁判文书
+    COURT_ANNOUNCE = "court_announce"   # 开庭公告
+    DISHONESTY = "dishonesty"           # 失信被执行人
+    LIMIT_HIGH = "limit_high"           # 限制高消费
+    EXECUTION = "execution"             # 执行信息
 
-    # 经营
-    FINANCIAL_DATA = "401"          # 财务数据
-    BOND_INFO = "402"               # 债券信息
-    GUARANTEE_INFO = "403"          # 对外担保
-    PLEDGE_INFO = "404"             # 股权质押
+    # ── 舆情监控 ──
+    NEWS_NEGATIVE = "news_negative"     # 负面舆情
+    NEWS_ALL = "news_all"               # 全部新闻
+    RESEARCH_REPORT = "research"        # 研报
 
-    # 关联
-    RELATED_PARTIES = "501"         # 关联方
-    UBO_CHAIN = "502"               # 受益所有人链
-    GROUP_NETWORK = "503"           # 集团关系网络
+    # ── 财务数据 ──
+    FINANCIAL_STATEMENT = "financial"   # 财务报表
+    FINANCIAL_INDICATORS = "fin_indic"  # 财务指标
 
-    # 区域
-    REGION_CODE = "154"             # 行政区划代码
-    REGION_ECONOMY = "486"          # 区域经济与债务
+    # ── 债券专项 ──
+    BOND_PROFILE = "bond_profile"       # 债券深度资料
+    BOND_CREDIT = "bond_credit"         # 债券信用评级
+    CITY_INVEST = "city_invest"         # 城投专题 (200+指标)
 
+    # ── 区域经济 ──
+    REGION_CODE = "region_code"         # 地区代码 (dataId=154)
+    REGION_ECONOMY = "region_economy"   # 区域经济 (dataId=486)
+    REGION_DEBT = "region_debt"         # 地方债务
+
+    # ── 关联方 ──
+    RELATED_PARTIES = "related"         # 关联方
+    UBO_CHAIN = "ubo"                   # 受益所有人
+    GROUP_NETWORK = "group"             # 集团网络
+
+    # ── 金融机构 ──
+    FIN_INSTITUTION = "fin_inst"        # 金融机构百科 (15大类)
+
+    # ── 监控 ──
+    WATCHLIST = "watchlist"             # 自选组合监控
+    ALERT_PUSH = "alert_push"           # 预警推送
+
+
+# ═══════════════════════════════════════════════════════════════
+# 端点注册表 — 所有已知的 API 端点
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class Endpoint:
+    """单个 API 端点定义"""
+    key: str                           # 端点标识
+    url: str                           # 完整URL或路径
+    method: str = "GET"                # GET/POST
+    api_type: str = "rest"             # rest / legacy / public
+    description: str = ""
+    params_template: Dict = field(default_factory=dict)  # 默认参数
+    headers_template: Dict = field(default_factory=dict)  # 额外请求头
+    dataId: Optional[str] = None       # 旧版API的dataId
+
+
+ENDPOINTS: Dict[str, Endpoint] = {
+    # ── 新版 REST API ──
+    "search_multi": Endpoint(
+        key="search_multi",
+        url="/finchinaAPP/v1/finchina-search/v1/multipleSearch",
+        method="GET",
+        api_type="rest",
+        description="多重搜索: 企业/证券/综合",
+        params_template={"pagesize": 10, "skip": 0, "template": "list", "isRelationSearch": 0},
+    ),
+    "bond_notice": Endpoint(
+        key="bond_notice",
+        url="/finchinaAPP/v1/finchina-search/v1/webNotice/getF9NoticeList",
+        method="POST",
+        api_type="rest",
+        description="债券公告列表 (F9深度资料)",
+        params_template={"type": "co", "skip": 0, "size": 10, "oneLevelItemCode": "50", "f9Below": "true"},
+        headers_template={"content-type": "application/x-www-form-urlencoded;charset=UTF-8"},
+    ),
+
+    # ── 旧版内部 API (getData.action) ──
+    "region_code": Endpoint(
+        key="region_code",
+        url="/getData.action",
+        method="GET",
+        api_type="legacy",
+        description="行政区划代码查询",
+        dataId="154",
+    ),
+    "region_economy": Endpoint(
+        key="region_economy",
+        url="/getData.action",
+        method="GET",
+        api_type="legacy",
+        description="区域经济与债务指标 (3000+行政区)",
+        dataId="486",
+        params_template={
+            "func": "/app/regionalEconomic2",
+            "module_type": "area_economy_and_debt",
+            "dateQueryType": "1",
+            "size": "10000",
+        },
+    ),
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 会话管理
+# ═══════════════════════════════════════════════════════════════
 
 @dataclass
 class QYJTSession:
     """企业预警通登录会话"""
-    token: str = ""                 # s_tk 短令牌 (~10min过期)
-    refresh_token: str = ""         # r_tk 刷新令牌
-    user_id: str = ""               # user ID
+    token_name: str = "PCUSS"          # 新版用 token_name, 旧版固定 PCUSS
+    token_value: str = ""              # s_tk 短令牌
+    refresh_token: str = ""            # r_tk
+    user_id: str = ""
     cookies: Dict[str, str] = field(default_factory=dict)
-    raw_cookie: str = ""            # Cookie 原始字符串
+    raw_cookie: str = ""
     login_time: float = 0.0
-    token_expiry: float = 600       # 默认10分钟
+    token_ttl: float = 540             # 9分钟安全期 (<10分钟过期)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -87,184 +179,127 @@ class QYJTSession:
 
 class QYJTAdapter:
     """
-    企业预警通数据适配器
+    企业预警通全功能适配器
 
-    使用方式:
-        adapter = QYJTAdapter()
+    用法:
+        a = QYJTAdapter()
+        a.login_via_selenium("138xxxx", "password")
 
-        # Layer 1: 公开数据 (无需登录)
-        data = adapter.search_public("特斯拉")
+        # 搜索
+        r = a.search("特斯拉")                         # REST API
+        r = a.search_company("特斯拉")                 # 综合查询
 
-        # Layer 2: 登录后API (需要账号)
-        adapter.login_via_selenium("username", "password", manual_captcha=True)
-        risk = adapter.call_api(QYJTModule.RISK_SCAN, company="特斯拉")
+        # 债券
+        r = a.get_bond_notices("bond_code_123")        # 债券公告
 
-        # Layer 3: 第三方替代API
-        risk_alt = adapter.call_alternative_api("特斯拉")
+        # 区域经济
+        codes = a.get_region_codes()                   # 省市县代码
+        r = a.get_region_economy("2024", "310000")     # 区域经济指标
 
-    分层获取策略:
-        1. 先尝试 Layer 1 (免费公开) — 覆盖企业基础信息、新闻
-        2. Layer 1 不够 → 尝试 Layer 2 (需要账号) — 覆盖风险、司法、财务
-        3. Layer 2 不可用 → 尝试 Layer 3 (第三方API) — 兜底
-        4. 全部失败 → 降级到 WebSearch
+        # 智能查询（自动选最优路径）
+        r = a.query("特斯拉", modules=[QYJTModule.RISK_SCAN, QYJTModule.COURT_CASES])
     """
 
     BASE_URL = "https://www.qyyjt.cn"
-    API_ENDPOINT = f"{BASE_URL}/getData.action"
     LOGIN_URL = f"{BASE_URL}/user/login"
-    SEARCH_URL = f"{BASE_URL}/search"
 
     def __init__(self, session_path: str = ".wallstreet/qyyjt_session.json"):
         self.session = QYJTSession()
         self.session_path = Path(session_path)
         self._lock = threading.RLock()
-
-        # 结果缓存 (避免重复请求)
         self._cache: Dict[str, Tuple[float, Any]] = {}
-        self._cache_ttl = 300  # 5分钟
+        self._cache_ttl = 300
 
-        # 调用统计
-        self._stats = {"layer1": 0, "layer2": 0, "layer3": 0, "fallback": 0}
+        # 请求计数 (用于速率限制)
+        self._request_count = 0
+        self._rate_limit_window = 60  # 每分钟最多请求数
+        self._rate_limit_max = 30     # 保守值
 
-        # 加载持久化会话
+        # 统计
+        self._stats = {"rest": 0, "legacy": 0, "public": 0, "errors": 0}
+
         self._load_session()
+        self._time_provider = time.time
 
-    # ── Layer 1: 公开数据 (WebSearch-based) ───────────────
-
-    def search_public(self, company: str) -> Dict[str, Any]:
-        """
-        通过 WebSearch 抓取企业预警通公开可见数据。
-
-        返回:
-            {
-                "source": "qyyjt_public",
-                "company": company,
-                "risk_signals": [...],       # 风险信号列表
-                "news_items": [...],          # 相关新闻
-                "basic_info": {...},          # 基本信息
-                "urls": [...]                 # 原始链接
-            }
-        """
-        self._stats["layer1"] += 1
-        cache_key = f"public_{company}"
-        cached = self._cache_get(cache_key)
-        if cached:
-            return cached
-
-        result = {
-            "source": "qyyjt_public",
-            "company": company,
-            "risk_signals": [],
-            "news_items": [],
-            "basic_info": {},
-            "urls": [],
-            "fetched_at": datetime.now().isoformat(),
-        }
-
-        # 这里由上层 WebSearch engine 实际执行搜索
-        # 返回的是结构化指令，告诉上层该搜什么
-        result["_search_queries"] = [
-            f"site:qyyjt.cn {company} 风险",
-            f"site:qyyjt.cn {company} 司法",
-            f"site:qyyjt.cn {company} 舆情",
-            f"{company} 企业预警通 风险扫描",
-        ]
-
-        self._cache_set(cache_key, result)
-        return result
-
-    # ── Layer 2: 登录 + 内部 API ──────────────────────────
+    # ═══════════════════════════════════════════════════════
+    # 登录
+    # ═══════════════════════════════════════════════════════
 
     def login_via_selenium(self, username: str, password: str,
-                           manual_captcha: bool = True,
-                           timeout: int = 60) -> bool:
+                           headless: bool = True) -> bool:
         """
-        Selenium 模拟登录，获取认证令牌。
+        Selenium 模拟登录。
 
-        Args:
-            username: 企业预警通用户名 (手机号)
-            password: 密码
-            manual_captcha: True=手动输入验证码, False=尝试OCR
-            timeout: 登录超时 (秒)
-
-        Returns:
-            是否登录成功
+        流程: 打开登录页 → 填写手机号密码 → 等待手动输入验证码 →
+              点击登录 → 从 localStorage 提取 s_tk/r_tk/u_info
         """
         try:
             from selenium import webdriver
             from selenium.webdriver.common.by import By
             from selenium.webdriver.support.ui import WebDriverWait
         except ImportError:
-            raise ImportError(
-                "Selenium 未安装。安装: pip install selenium\n"
-                "还需要 ChromeDriver: https://chromedriver.chromium.org/"
-            )
+            raise ImportError("pip install selenium + ChromeDriver")
 
         options = webdriver.ChromeOptions()
-        options.add_argument("--headless")  # 无头模式
+        if headless:
+            options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-gpu")
-        options.add_experimental_option("excludeSwitches", ["enable-logging"])
+        options.add_argument("--window-size=1280,800")
 
         driver = webdriver.Chrome(options=options)
-        wait = WebDriverWait(driver, timeout)
 
         try:
-            # 1. 打开登录页
             driver.get(self.LOGIN_URL)
             time.sleep(2)
 
-            # 2. 填写表单
-            username_input = driver.find_element(By.ID, "username")
-            username_input.send_keys(username)
+            # 切换到密码登录tab
+            try:
+                pwd_tab = driver.find_element(By.XPATH, "//div[text()='账户密码登录']")
+                pwd_tab.click()
+                time.sleep(0.5)
+            except Exception:
+                pass
 
-            password_input = driver.find_element(By.ID, "password")
-            password_input.send_keys(password)
+            # 填写
+            phone = driver.find_element(By.XPATH, "//input[@placeholder='请输入手机号']")
+            phone.send_keys(username)
 
-            # 3. 验证码 — 等待用户手动输入
-            if manual_captcha:
-                print("\n[企业预警通] 请在浏览器中手动输入验证码，然后按 Enter 继续...")
-                input()
-            else:
-                # 尝试简单 OCR (需要额外依赖)
-                self._solve_captcha(driver)
+            pwd_input = driver.find_element(By.XPATH, "//input[@type='password']")
+            pwd_input.send_keys(password)
 
-            # 4. 点击登录
-            login_btn = driver.find_element(
-                By.CSS_SELECTOR, "#rc-tabs-0-panel-0 > form button[type='submit']"
-            )
+            print("\n[企业预警通] 请在浏览器中手动完成验证码, 然后按 Enter...")
+            input()
+
+            # 登录
+            login_btn = driver.find_element(By.XPATH, "//button[contains(., '登 录')]")
             login_btn.click()
-            time.sleep(10)  # 等待登录完成
+            time.sleep(8)
 
-            # 5. 提取凭据
-            cookies = driver.get_cookies()
-            cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
-
-            # localStorage 中的令牌
+            # 提取凭据
             s_tk = driver.execute_script("return localStorage.getItem('s_tk');") or ""
             r_tk = driver.execute_script("return localStorage.getItem('r_tk');") or ""
             u_info_raw = driver.execute_script("return localStorage.getItem('u_info');") or "{}"
-
             u_info = json.loads(u_info_raw)
-            user_id = u_info.get("user", "")
 
-            if not s_tk or not user_id:
-                print("[企业预警通] 登录失败: 未获取到认证令牌")
+            cookies = driver.get_cookies()
+            cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+
+            if not s_tk:
+                print("[企业预警通] 登录失败: 未获取到 s_tk")
                 return False
 
-            # 去除 s_tk 外层引号
-            token = s_tk.strip('"\'') if s_tk else ""
-
             self.session = QYJTSession(
-                token=token,
+                token_name="PCUSS",
+                token_value=s_tk.strip('"\''),
                 refresh_token=r_tk.strip('"\''),
-                user_id=user_id,
+                user_id=u_info.get("user", ""),
                 raw_cookie=cookie_str,
-                login_time=time.time(),
+                login_time=self._time_provider(),
             )
 
             self._save_session()
-            print(f"[企业预警通] 登录成功: user={user_id}")
+            print(f"[企业预警通] 登录成功 user={self.session.user_id}")
             return True
 
         except Exception as e:
@@ -273,251 +308,318 @@ class QYJTAdapter:
         finally:
             driver.quit()
 
-    def call_api(self, module: QYJTModule, **params) -> Dict[str, Any]:
+    # ═══════════════════════════════════════════════════════
+    # 新版 REST API 调用
+    # ═══════════════════════════════════════════════════════
+
+    def search(self, keyword: str, search_type: str = "all",
+               page_size: int = 10) -> Dict[str, Any]:
         """
-        调用企业预警通内部 API。
+        多重搜索 — 新版 REST API
 
         Args:
-            module: 数据模块 (如 QYJTModule.RISK_SCAN)
-            **params: 查询参数 (company, keyword, regionCode, datetime 等)
-
-        Returns:
-            API 响应 JSON
+            keyword: 搜索关键词 (企业名/证券名/功能)
+            search_type: all / enterprise / security
+            page_size: 每页结果数
         """
-        # 检查 token 是否过期
-        if not self._token_valid():
-            if self.session.refresh_token:
-                self._refresh_token()
-            else:
-                raise RuntimeError(
-                    "企业预警通 token 已过期，需要重新登录。\n"
-                    "调用 login_via_selenium(username, password)"
-                )
+        ep = ENDPOINTS["search_multi"]
+        self._rate_limit_check()
 
-        headers = self._build_headers(module)
-        url = self._build_url(module, params)
+        params = dict(ep.params_template)
+        params["text"] = keyword
+        params["pagesize"] = page_size
+
+        headers = self._build_rest_headers()
+        headers["referer"] = f"{self.BASE_URL}/search?text={keyword}"
 
         try:
-            import requests
-            resp = requests.get(url, headers=headers, timeout=30)
-            resp.raise_for_status()
+            resp = self._http_get(f"{self.BASE_URL}{ep.url}", headers=headers, params=params)
             data = resp.json()
-            self._stats["layer2"] += 1
-            return data
+            self._check_response_errors(data)
+            self._stats["rest"] += 1
+            return self._parse_search_result(data)
         except Exception as e:
-            print(f"[企业预警通] API 调用失败 ({module.value}): {e}")
-            return {"error": str(e), "module": module.value}
+            self._stats["errors"] += 1
+            return {"error": str(e), "source": "qyyjt_rest", "endpoint": "search_multi"}
 
-    def search_company_risk(self, company: str) -> Dict[str, Any]:
-        """快捷方法: 企业风险综合查询"""
-        result = {"company": company, "source": "qyyjt_internal"}
+    def get_bond_notices(self, bond_code: str, page_size: int = 10,
+                         skip: int = 0) -> Dict[str, Any]:
+        """债券公告列表 (F9深度资料)"""
+        ep = ENDPOINTS["bond_notice"]
+        self._rate_limit_check()
 
-        # 风险扫描
-        risk = self.call_api(QYJTModule.RISK_SCAN, keyword=company)
-        result["risk"] = self._parse_risk_response(risk)
+        payload = dict(ep.params_template)
+        payload["code"] = bond_code
+        payload["skip"] = skip
+        payload["size"] = page_size
 
-        # 司法涉诉
-        court = self.call_api(QYJTModule.COURT_RECORDS, keyword=company)
-        result["court"] = self._parse_court_response(court)
+        headers = self._build_rest_headers()
+        headers["content-type"] = "application/x-www-form-urlencoded;charset=UTF-8"
+        headers["origin"] = self.BASE_URL
+        headers["referer"] = f"{self.BASE_URL}/bond/f9?code={bond_code}"
 
-        # 负面舆情
-        news = self.call_api(QYJTModule.NEWS_NEGATIVE, keyword=company)
-        result["news"] = self._parse_news_response(news)
+        try:
+            resp = self._http_post(f"{self.BASE_URL}{ep.url}", headers=headers, data=payload)
+            data = resp.json()
+            self._check_response_errors(data)
+            self._stats["rest"] += 1
+            return self._parse_bond_notices(data)
+        except Exception as e:
+            self._stats["errors"] += 1
+            return {"error": str(e), "source": "qyyjt_rest", "endpoint": "bond_notice"}
 
-        return result
+    # ═══════════════════════════════════════════════════════
+    # 旧版内部 API
+    # ═══════════════════════════════════════════════════════
 
-    # ── Layer 3: 第三方替代API ───────────────────────────
+    def get_region_codes(self) -> Dict[str, Any]:
+        """获取全国省/市/县行政区划代码 (dataId=154)"""
+        return self._call_legacy("region_code")
 
-    def call_alternative_api(self, company: str) -> Dict[str, Any]:
+    def get_region_economy(self, year: str = "2024",
+                           region_codes: str = "",
+                           indicators: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        通过阿里云API市场 / 腾讯云 获取企业风险数据。
-
-        替代方案:
-          - 阿里云: 企业信号详情API
-          - 腾讯云: 企业风险报告API
-          - 天眼查MCP (已有集成)
-          - 企查查MCP (已有集成)
-        """
-        self._stats["layer3"] += 1
-        result = {"company": company, "source": "alternative_api", "methods": []}
-
-        # 阿里云API市场 — 企业信号详情
-        # 接口: https://market.aliyun.com/apimarket/detail/cmapi00068436
-        # 需要 AppCode
-        result["methods"].append({
-            "name": "aliyun_enterprise_signal",
-            "description": "企业信号详情API — 风险信号等级/标签/摘要",
-            "url": "https://jqyzqyxx.market.alicloudapi.com/enterprise/signal",
-            "requires": "AppCode (阿里云API网关)",
-        })
-
-        # 腾讯云 — 企业风险报告
-        result["methods"].append({
-            "name": "tencent_enterprise_risk",
-            "description": "企业风险报告API — 司法/税务/合同履约",
-            "url": "https://cloud.tencent.com/product/erp",
-            "requires": "SecretId + SecretKey (腾讯云)",
-        })
-
-        return result
-
-    # ── 公共接口: 统一查询 ──────────────────────────────
-
-    def query(self, company: str, modules: Optional[List[QYJTModule]] = None) -> Dict[str, Any]:
-        """
-        智能查询 — 自动选择最佳数据获取路径。
-
-        优先级: Layer 1 (公开) → Layer 2 (内部API) → Layer 3 (第三方) → Fallback
+        区域经济与债务指标 (dataId=486)
 
         Args:
-            company: 公司名称
-            modules: 需要的模块列表 (None=全部)
+            year: 年份
+            region_codes: 逗号分隔的地区代码
+            indicators: 指标列表, 默认16项核心指标
+        """
+        if indicators is None:
+            indicators = [
+                "地区生产总值", "人均地区生产总值", "GDP增速",
+                "工业总产值", "固定资产投资", "进出口总额",
+                "社会消费品零售总额", "社会消费品零售总额增速",
+                "城镇居民人均可支配收入",
+                "一般公共预算收入", "一般公共预算支出",
+                "地方政府债务余额", "地方政府债务限额",
+                "负债率", "债务率1",
+            ]
 
-        Returns:
-            综合查询结果
+        ep = ENDPOINTS["region_economy"]
+        params = dict(ep.params_template)
+        params["indicName"] = ",".join(indicators)
+        params["datetime"] = year
+        params["regionCode"] = region_codes
+
+        return self._call_legacy("region_economy", extra_params=params)
+
+    def _call_legacy(self, endpoint_key: str,
+                     extra_params: Optional[Dict] = None) -> Dict[str, Any]:
+        """调用旧版 API"""
+        ep = ENDPOINTS.get(endpoint_key)
+        if not ep:
+            return {"error": f"Unknown endpoint: {endpoint_key}"}
+
+        if not self._token_valid():
+            return {"error": "token_expired", "hint": "需要重新登录"}
+
+        self._rate_limit_check()
+
+        headers = self._build_legacy_headers(ep)
+        url = self.BASE_URL + ep.url
+
+        try:
+            resp = self._http_get(url, headers=headers, params=extra_params or {})
+            data = resp.json()
+            self._check_response_errors(data)
+            self._stats["legacy"] += 1
+            return data
+        except Exception as e:
+            self._stats["errors"] += 1
+            return {"error": str(e), "source": "qyyjt_legacy", "endpoint": endpoint_key}
+
+    # ═══════════════════════════════════════════════════════
+    # 智能综合查询
+    # ═══════════════════════════════════════════════════════
+
+    def search_company(self, company: str) -> Dict[str, Any]:
+        """
+        企业综合查询 — 尽可能多地拉取数据。
+
+        优先级: REST多重搜索 → 有token则继续爬详情
         """
         result = {
             "company": company,
             "timestamp": datetime.now().isoformat(),
-            "layers_used": [],
+            "layers": [],
             "data": {},
         }
 
-        # Layer 1 永远是第一步 — 零成本
-        public = self.search_public(company)
-        result["data"]["public"] = public
-        result["layers_used"].append("layer1")
+        # Layer 1: REST 搜索
+        search = self.search(company)
+        result["data"]["search"] = search
+        result["layers"].append("rest_search")
 
-        # Layer 2 — 如果有有效 session
+        # Layer 2: 如果有 token, 尝试更多
         if self._token_valid():
             try:
-                internal = self.search_company_risk(company)
-                result["data"]["internal"] = internal
-                result["layers_used"].append("layer2")
+                # 尝试搜索债券相关信息
+                if "list" in search:
+                    for item in search.get("list", [])[:3]:
+                        code = item.get("code", "")
+                        if code:
+                            result["data"][f"bond_{code}"] = self.get_bond_notices(code)
+                result["layers"].append("rest_detail")
             except Exception as e:
-                result["data"]["internal_error"] = str(e)
-
-        # Layer 3 — 如果前两层数据不足
-        if "internal" not in result["data"] or not result["data"].get("internal", {}).get("risk"):
-            result["data"]["alternative"] = self.call_alternative_api(company)
-            result["layers_used"].append("layer3")
+                result["data"]["detail_error"] = str(e)
 
         return result
 
-    # ── 内部辅助方法 ────────────────────────────────────
+    def query(self, company: str,
+              modules: Optional[List[QYJTModule]] = None) -> Dict[str, Any]:
+        """
+        全功能查询入口 — 按需调用所有可用数据源。
 
-    def _token_valid(self) -> bool:
-        """检查 token 是否还有效"""
-        if not self.session.token:
-            return False
-        elapsed = time.time() - self.session.login_time
-        return elapsed < self.session.token_expiry
+        没有账号时只走搜索+公开数据。
+        """
+        result = self.search_company(company)
 
-    def _refresh_token(self) -> bool:
-        """尝试用 refresh_token 续期"""
-        # 企业预警通的 refresh 机制未知
-        # 这里先返回 False，触发重新登录
-        print("[企业预警通] token 过期，需要重新登录")
-        return False
+        if not modules:
+            modules = [QYJTModule.SEARCH_MULTI]
 
-    def _build_headers(self, module: QYJTModule) -> Dict[str, str]:
-        """构建 API 请求头"""
+        for mod in modules:
+            try:
+                if mod == QYJTModule.SEARCH_MULTI:
+                    continue  # 已经查过了
+                elif mod == QYJTModule.BOND_NOTICE:
+                    if "list" in result.get("data", {}).get("search", {}):
+                        for item in result["data"]["search"].get("list", [])[:2]:
+                            code = item.get("code", "")
+                            if code:
+                                result["data"]["bond_notices"] = self.get_bond_notices(code)
+                elif mod == QYJTModule.REGION_ECONOMY:
+                    if self._token_valid():
+                        result["data"]["region"] = self.get_region_economy()
+            except Exception as e:
+                result["data"][f"{mod.value}_error"] = str(e)
+
+        return result
+
+    # ═══════════════════════════════════════════════════════
+    # 公开数据 (无需登录)
+    # ═══════════════════════════════════════════════════════
+
+    def search_public(self, company: str) -> Dict[str, Any]:
+        """
+        Layer 0: 公开数据 — 不登录也能拿到的信息。
+
+        返回结构化指令，由上层 WebSearch engine 实际执行。
+        """
+        self._stats["public"] += 1
+
         return {
-            "PCUSS": self.session.token,
+            "source": "qyyjt_public",
+            "company": company,
+            "fetched_at": datetime.now().isoformat(),
+            "_queries": [
+                f"site:qyyjt.cn {company} 风险",
+                f"site:qyyjt.cn {company} 司法",
+                f"site:qyyjt.cn {company} 舆情",
+                f"{company} 企业预警通 风险扫描",
+                f"{company} 企业预警通 债券",
+            ],
+            "_urls": [
+                f"{self.BASE_URL}/search?text={company}",
+            ],
+        }
+
+    # ═══════════════════════════════════════════════════════
+    # 内部辅助
+    # ═══════════════════════════════════════════════════════
+
+    def _build_rest_headers(self) -> Dict[str, str]:
+        """新版 REST API 请求头"""
+        return {
+            "accept": "application/json, text/plain, */*",
+            "client": "pc-web;pro",
+            self.session.token_name: self.session.token_value,
             "user": self.session.user_id,
+            "terminal": "pc-web;pro",
+            "user-agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36"
+            ),
+            "referer": f"{self.BASE_URL}/home",
             "cookie": self.session.raw_cookie,
-            "dataId": module.value,
+        }
+
+    def _build_legacy_headers(self, ep: Endpoint) -> Dict[str, str]:
+        """旧版 getData.action 请求头"""
+        headers = {
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Connection": "keep-alive",
+            "Host": "www.qyyjt.cn",
+            "Origin": self.BASE_URL,
+            "PCUSS": self.session.token_value,
+            "user": self.session.user_id,
             "system": "new",
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
             ),
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://www.qyyjt.cn/",
+            "cookie": self.session.raw_cookie,
+            "Referer": self.BASE_URL,
         }
+        if ep.dataId:
+            headers["dataId"] = ep.dataId
+        return headers
 
-    def _build_url(self, module: QYJTModule, params: Dict) -> str:
-        """构建 API URL"""
-        base = self.API_ENDPOINT
-        query_parts = []
+    def _http_get(self, url: str, headers: Dict, params: Dict = None) -> Any:
+        """HTTP GET with requests"""
+        import requests
+        return requests.get(url, headers=headers, params=params, timeout=30)
 
-        if module == QYJTModule.REGION_ECONOMY:
-            query_parts = [
-                f"keyword={params.get('keyword', '')}",
-                "func=/app/regionalEconomic2",
-                "module_type=area_economy_and_debt",
-                "dateQueryType=1",
-                f"size={params.get('size', 100)}",
-                f"indicName={params.get('indicName', '')}",
-                f"datetime={params.get('datetime', '2024')}",
-                f"regionCode={params.get('regionCode', '')}",
-            ]
-        else:
-            # 通用查询
-            keyword = params.get("keyword", params.get("company", ""))
-            query_parts = [f"keyword={keyword}"]
+    def _http_post(self, url: str, headers: Dict, data: Dict = None) -> Any:
+        """HTTP POST with requests"""
+        import requests
+        return requests.post(url, headers=headers, data=data, timeout=30)
 
-        query_string = "&".join(q for q in query_parts if q)
-        return f"{base}?{query_string}" if query_string else base
+    def _check_response_errors(self, data: Dict):
+        """检查 API 错误码"""
+        rc = data.get("returncode", data.get("code", 0))
+        if rc == 104:
+            raise QYJTTokenExpired("token 已过期, 需要重新登录")
+        elif rc == 206:
+            raise QYJTRateLimited("请求过于频繁, 请稍后再试")
 
-    def _parse_risk_response(self, raw: Dict) -> Dict:
-        """解析风险扫描响应"""
-        if not raw or "data" not in raw:
-            return {"signals": [], "summary": "无数据"}
-        data = raw.get("data", {})
+    def _parse_search_result(self, data: Dict) -> Dict:
+        """解析搜索结果"""
+        result = {"total": 0, "list": [], "raw": data}
+        inner = data.get("data", {})
+        if isinstance(inner, dict):
+            result["list"] = inner.get("list", [])
+            result["total"] = inner.get("total", len(result["list"]))
+        return result
+
+    def _parse_bond_notices(self, data: Dict) -> Dict:
+        """解析债券公告"""
         return {
-            "signals": data.get("return1", []) or data.get("signals", []),
-            "summary": data.get("summary", ""),
-            "risk_level": data.get("riskLevel", data.get("level", "unknown")),
+            "total": len(data.get("data", [])),
+            "notices": data.get("data", []),
+            "raw": data,
         }
 
-    def _parse_court_response(self, raw: Dict) -> Dict:
-        """解析司法涉诉响应"""
-        return {"cases": raw.get("data", {}).get("return1", []) if raw else []}
-
-    def _parse_news_response(self, raw: Dict) -> Dict:
-        """解析舆情新闻响应"""
-        return {"items": raw.get("data", {}).get("return1", []) if raw else []}
-
-    def _solve_captcha(self, driver) -> bool:
-        """尝试自动识别验证码 (需要额外依赖)"""
-        # 简单实现: 截图 + 基础 OCR
-        # 生产环境建议接入打码平台
-        try:
-            from PIL import Image
-            import io
-            # 找到验证码元素并截图
-            captcha_img = driver.find_element(By.CSS_SELECTOR, "img.captcha")
-            screenshot = captcha_img.screenshot_as_png
-
-            # 这里需要接入 OCR (pytesseract / ddddocr)
-            # 暂略 — 默认使用 manual_captcha=True
+    def _token_valid(self) -> bool:
+        if not self.session.token_value:
             return False
-        except Exception:
-            return False
+        return (self._time_provider() - self.session.login_time) < self.session.token_ttl
 
-    # ── 缓存 ────────────────────────────────────────────
-
-    def _cache_get(self, key: str) -> Optional[Any]:
-        with self._lock:
-            if key in self._cache:
-                ts, val = self._cache[key]
-                if time.time() - ts < self._cache_ttl:
-                    return val
-                del self._cache[key]
-        return None
-
-    def _cache_set(self, key: str, value: Any):
-        with self._lock:
-            self._cache[key] = (time.time(), value)
-
-    # ── 持久化 ──────────────────────────────────────────
+    def _rate_limit_check(self):
+        """简单的速率限制"""
+        self._request_count += 1
+        if self._request_count > self._rate_limit_max:
+            time.sleep(random.uniform(1, 3))
+            self._request_count = 0
 
     def _save_session(self):
-        """保存登录会话到磁盘"""
         data = {
-            "token": self.session.token,
+            "token_name": self.session.token_name,
+            "token_value": self.session.token_value,
             "refresh_token": self.session.refresh_token,
             "user_id": self.session.user_id,
             "raw_cookie": self.session.raw_cookie,
@@ -527,7 +629,6 @@ class QYJTAdapter:
         self.session_path.write_text(json.dumps(data))
 
     def _load_session(self):
-        """从磁盘加载登录会话"""
         if self.session_path.is_file():
             try:
                 data = json.loads(self.session_path.read_text())
@@ -536,30 +637,40 @@ class QYJTAdapter:
                 pass
 
     def get_stats(self) -> dict:
-        return dict(self._stats)
+        s = dict(self._stats)
+        s["logged_in"] = self._token_valid()
+        s["cache_size"] = len(self._cache)
+        return s
+
+    def list_endpoints(self) -> List[Dict]:
+        """列出所有已知端点"""
+        return [
+            {
+                "key": k,
+                "url": e.url,
+                "method": e.method,
+                "api_type": e.api_type,
+                "description": e.description,
+            }
+            for k, e in ENDPOINTS.items()
+        ]
 
 
 # ═══════════════════════════════════════════════════════════════
-# 命令行入口
+# 异常
 # ═══════════════════════════════════════════════════════════════
 
-def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="企业预警通数据查询")
-    parser.add_argument("company", help="公司名称")
-    parser.add_argument("--login", action="store_true", help="先登录")
-    parser.add_argument("--username", help="用户名(手机号)")
-    parser.add_argument("--password", help="密码")
-    args = parser.parse_args()
+class QYJTTokenExpired(Exception):
+    pass
 
-    adapter = QYJTAdapter()
-
-    if args.login and args.username:
-        adapter.login_via_selenium(args.username, args.password)
-
-    result = adapter.query(args.company)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+class QYJTRateLimited(Exception):
+    pass
 
 
-if __name__ == "__main__":
-    main()
+# ═══════════════════════════════════════════════════════════════
+# 便捷函数
+# ═══════════════════════════════════════════════════════════════
+
+def create_adapter(session_path: str = ".wallstreet/qyyjt_session.json") -> QYJTAdapter:
+    """创建默认配置的适配器"""
+    return QYJTAdapter(session_path=session_path)
