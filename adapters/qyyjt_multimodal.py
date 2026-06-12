@@ -118,6 +118,90 @@ class FinancialIndicators:
     raw_text: str = ""
 
 
+@dataclass
+class PenaltyDecision:
+    """行政处罚决定书结构化数据"""
+    penalty_number: str = ""    # 处罚文号
+    agency: str = ""            # 处罚机关
+    target: str = ""            # 被处罚人
+    violation: str = ""         # 违法事实
+    penalty_type: str = ""      # 处罚种类
+    penalty_amount: str = ""    # 罚款金额
+    decision_date: str = ""     # 处罚日期
+    legal_basis: str = ""       # 法律依据
+    raw_text: str = ""
+
+
+@dataclass
+class AuditOpinion:
+    """审计报告结构化数据"""
+    auditor: str = ""           # 审计机构
+    audit_type: str = ""        # 审计意见类型
+    audit_year: str = ""        # 审计年度
+    key_matters: str = ""       # 关键审计事项
+    going_concern: str = ""     # 持续经营
+    report_date: str = ""       # 报告日期
+    raw_text: str = ""
+
+
+@dataclass
+class BondProspectus:
+    """债券募集说明书结构化数据"""
+    bond_name: str = ""         # 债券名称
+    issuer: str = ""            # 发行人
+    bond_type: str = ""         # 债券品种
+    issue_amount: str = ""      # 发行规模
+    maturity: str = ""          # 期限
+    coupon_rate: str = ""       # 票面利率
+    credit_rating: str = ""     # 信用评级
+    lead_underwriter: str = ""  # 主承销商
+    use_of_proceeds: str = ""   # 资金用途
+    guarantor: str = ""         # 担保人
+    raw_text: str = ""
+
+
+@dataclass
+class ExecutionRuling:
+    """执行裁定书结构化数据"""
+    case_number: str = ""       # 执行案号
+    court: str = ""             # 执行法院
+    applicant: str = ""         # 申请执行人
+    respondent: str = ""        # 被执行人
+    execution_amount: str = ""  # 执行标的
+    filing_date: str = ""       # 立案日期
+    ruling_date: str = ""       # 裁定日期
+    execution_status: str = ""  # 执行情况
+    property_found: str = ""    # 财产发现
+    raw_text: str = ""
+
+
+@dataclass
+class DishonestyNotice:
+    """失信被执行人决定书结构化数据"""
+    case_number: str = ""       # 案号
+    court: str = ""             # 执行法院
+    dishonest_person: str = ""  # 失信被执行人
+    id_number: str = ""         # 身份证/统一信用代码
+    violation: str = ""         # 失信情形
+    publish_date: str = ""      # 发布日期
+    legal_basis: str = ""       # 法律依据
+    raw_text: str = ""
+
+
+@dataclass
+class CreditRating:
+    """信用评级报告结构化数据"""
+    rated_entity: str = ""      # 评级对象
+    rating_agency: str = ""     # 评级机构
+    subject_rating: str = ""    # 主体信用等级
+    bond_rating: str = ""       # 债项信用等级
+    outlook: str = ""           # 评级展望
+    rating_date: str = ""       # 评级日期
+    key_factors: str = ""       # 评级关注
+    upgrade_downgrade: str = "" # 评级调整
+    raw_text: str = ""
+
+
 # ═══════════════════════════════════════════════════════════════
 # 主处理器
 # ═══════════════════════════════════════════════════════════════
@@ -575,31 +659,50 @@ class QYJTMultimodalProcessor:
     # ═══════════════════════════════════════════════════════
 
     def _extract_all_structured(self, text: str, filename: str) -> Dict[str, Any]:
-        """从文本中提取所有可识别的结构化信息"""
+        """从文本中提取所有可识别的结构化信息 (多类型识别)"""
         if not text.strip():
             return {}
 
-        data = {"document_type": "unknown"}
+        data = {"document_type": "unknown", "multimodal_version": "v1.1.0"}
 
-        # 营业执照
-        if any(kw in text for kw in ["营业执照", "统一社会信用代码", "法定代表人", "注册资本"]):
-            data["document_type"] = "business_license"
-            lic = self.extract_license_data(text)
-            data.update(vars(lic))
+        # 优先级匹配: 从最具体的文档类型开始
+        checks = [
+            # 处罚决定书
+            (["行政处罚决定书", "处罚决定书", "行政处罚", "违法事实", "处罚机关"],
+             "penalty_decision", lambda: vars(self.extract_penalty_decision(text))),
+            # 审计报告
+            (["审计报告", "审计意见", "关键审计事项", "会计师事务所"],
+             "audit_opinion", lambda: vars(self.extract_audit_opinion(text))),
+            # 债券募集说明书
+            (["募集说明书", "债券名称", "发行人", "发行规模", "主承销商"],
+             "bond_prospectus", lambda: vars(self.extract_bond_prospectus(text))),
+            # 执行裁定书
+            (["执行裁定书", "执行案号", "申请执行人", "被执行人", "执行标的"],
+             "execution_ruling", lambda: vars(self.extract_execution_ruling(text))),
+            # 失信决定书
+            (["失信被执行人", "失信决定书", "失信名单", "限制消费"],
+             "dishonesty_notice", lambda: vars(self.extract_dishonesty_notice(text))),
+            # 信用评级
+            (["信用评级", "主体信用等级", "债项信用等级", "评级展望"],
+             "credit_rating", lambda: vars(self.extract_credit_rating(text))),
+            # 营业执照
+            (["营业执照", "统一社会信用代码", "法定代表人"],
+             "business_license", lambda: vars(self.extract_license_data(text))),
+            # 裁判文书 (在处罚/执行之后 — 避免误判)
+            (["民事判决书", "刑事判决书", "行政判决书", "裁定书"],
+             "court_document", lambda: vars(self.extract_court_data(text))),
+            # 财务报表
+            (["资产负债表", "利润表", "现金流量表", "营业收入", "净利润"],
+             "financial_statement", lambda: vars(self.extract_financial_data(text))),
+        ]
 
-        # 裁判文书
-        elif any(kw in text for kw in ["民事判决书", "刑事判决书", "行政判决书", "裁定书", "案号"]):
-            data["document_type"] = "court_document"
-            court = self.extract_court_data(text)
-            data.update(vars(court))
+        for keywords, dtype, extractor in checks:
+            if any(kw in text for kw in keywords):
+                data["document_type"] = dtype
+                data.update(extractor())
+                break  # 第一个匹配胜出
 
-        # 财务报表
-        elif any(kw in text for kw in ["资产负债表", "利润表", "现金流量表", "营业收入", "净利润"]):
-            data["document_type"] = "financial_statement"
-            fin = self.extract_financial_data(text)
-            data.update(vars(fin))
-
-        # 通用提取
+        # 通用提取 (所有类型都提取)
         dates = re.findall(r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日号]?", text)
         if dates:
             data["dates_found"] = dates[:5]
@@ -607,6 +710,14 @@ class QYJTMultimodalProcessor:
         amounts = re.findall(r"(?:¥|￥|CNY|RMB)\s*[\d,]+\.?\d*\s*(?:万|亿|元)?", text)
         if amounts:
             data["amounts_found"] = amounts[:5]
+
+        # 风险关键词扫描
+        risk_keywords = [
+            "违约", "逾期", "失信", "执行", "破产", "清算", "吊销",
+            "处罚", "警告", "整改", "暂停", "限制", "冻结", "查封",
+            "重大不利变化", "无法表示意见", "否定意见", "持续经营能力存在重大不确定性",
+        ]
+        data["risk_signals"] = [kw for kw in risk_keywords if kw in text][:10]
 
         return data
 
@@ -678,6 +789,124 @@ class QYJTMultimodalProcessor:
             fin.year = year_match.group(1)
 
         return fin
+
+    # ═══════════════════════════════════════════════════════
+    # 扩展文档类型提取 — 处罚/审计/债券/执行/失信/评级
+    # ═══════════════════════════════════════════════════════
+
+    def extract_penalty_decision(self, text: str) -> PenaltyDecision:
+        """提取行政处罚决定书"""
+        pd = PenaltyDecision(raw_text=text)
+        pat = {
+            "penalty_number": r"(?:行政处罚决定书|处罚决定书)\s*(?:文号|编号)?[：:]?\s*([^\n]{5,40})",
+            "agency": r"(?:处罚机关|作出处罚|决定机关)[：:]?\s*([^\n]{4,30})",
+            "target": r"(?:被处罚人|当事人|被处罚单位)[：:]?\s*([^\n,，]{4,50})",
+            "violation": r"(?:违法事实|违法行为|违法情形)[：:]?\s*([^\n]{10,200})",
+            "penalty_type": r"(?:处罚种类|处罚类型)[：:]?\s*([^\n]{4,50})",
+            "penalty_amount": r"(?:罚款|处罚金额|并处)[：:]?\s*([^\n]{2,30})",
+            "decision_date": r"(?:处罚日期|决定日期|作出日期)[：:]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})",
+            "legal_basis": r"(?:依据|法律依据)[：:]?\s*([^\n]{10,100})",
+        }
+        for f, p in pat.items():
+            m = re.search(p, text); 
+            if m: setattr(pd, f, m.group(1).strip())
+        return pd
+
+    def extract_audit_opinion(self, text: str) -> AuditOpinion:
+        """提取审计报告/审计意见"""
+        ao = AuditOpinion(raw_text=text)
+        pat = {
+            "auditor": r"(?:审计机构|会计师事务所|审计单位)[：:]?\s*([^\n]{4,30})",
+            "audit_type": r"(?:审计意见类型|意见类型)[：:]?\s*([^\n]{2,20})",
+            "audit_year": r"(?:审计年度|报告年度)[：:]?\s*(\d{4})",
+            "key_matters": r"(?:关键审计事项|强调事项)[：:]?\s*([^\n]{10,300})",
+            "going_concern": r"(?:持续经营|持续经营能力).*?([^\n]{5,100})",
+            "report_date": r"(?:审计报告日|报告日期|出具日期)[：:]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})",
+        }
+        for f, p in pat.items():
+            m = re.search(p, text); 
+            if m: setattr(ao, f, m.group(1).strip())
+        # 自动判断意见类型
+        if not ao.audit_type:
+            if "无法表示意见" in text: ao.audit_type = "无法表示意见"
+            elif "否定意见" in text: ao.audit_type = "否定意见"
+            elif "保留意见" in text: ao.audit_type = "保留意见"
+            elif "无保留意见" in text or "标准无保留" in text: ao.audit_type = "标准无保留意见"
+        return ao
+
+    def extract_bond_prospectus(self, text: str) -> BondProspectus:
+        """提取债券募集说明书"""
+        bp = BondProspectus(raw_text=text)
+        pat = {
+            "bond_name": r"(?:债券名称|债券简称)[：:]?\s*([^\n]{4,40})",
+            "issuer": r"(?:发行人|发行主体)[：:]?\s*([^\n,，]{4,50})",
+            "bond_type": r"(?:债券品种|债券类型)[：:]?\s*([^\n]{4,30})",
+            "issue_amount": r"(?:发行规模|发行金额|发行总额)[：:]?\s*([^\n]{2,30})",
+            "maturity": r"(?:债券期限|期限)[：:]?\s*([^\n]{2,20})",
+            "coupon_rate": r"(?:票面利率|利率)[：:]?\s*([^\n]{2,15})",
+            "credit_rating": r"(?:信用评级|债项评级|主体评级)[：:]?\s*([^\n]{2,20})",
+            "lead_underwriter": r"(?:主承销商|牵头主承)[：:]?\s*([^\n]{4,30})",
+            "use_of_proceeds": r"(?:募集资金用途|资金用途)[：:]?\s*([^\n]{10,200})",
+            "guarantor": r"(?:担保人|担保方|增信方)[：:]?\s*([^\n]{4,30})",
+        }
+        for f, p in pat.items():
+            m = re.search(p, text); 
+            if m: setattr(bp, f, m.group(1).strip())
+        return bp
+
+    def extract_execution_ruling(self, text: str) -> ExecutionRuling:
+        """提取执行裁定书"""
+        er = ExecutionRuling(raw_text=text)
+        pat = {
+            "case_number": r"(?:执行案号|执行裁定书)[：:]?\s*([（(]\d{4}[）)][^\n]*?\d+号)",
+            "court": r"(?:执行法院|本院)[：:]?\s*([^\n]{4,20}(?:法院|执行局))",
+            "applicant": r"(?:申请执行人|申请人)[：:]?\s*([^\n,，]{4,30})",
+            "respondent": r"(?:被执行人|被申请人)[：:]?\s*([^\n,，]{4,30})",
+            "execution_amount": r"(?:执行标的|执行金额|申请执行标的)[：:]?\s*([^\n]{2,30})",
+            "filing_date": r"(?:申请执行日期|立案日期)[：:]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})",
+            "ruling_date": r"(?:裁定日期|作出日期)[：:]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})",
+            "execution_status": r"(?:执行情况|执行结果)[：:]?\s*([^\n]{5,100})",
+            "property_found": r"(?:财产发现|查控财产|财产线索)[：:]?\s*([^\n]{5,100})",
+        }
+        for f, p in pat.items():
+            m = re.search(p, text); 
+            if m: setattr(er, f, m.group(1).strip())
+        return er
+
+    def extract_dishonesty_notice(self, text: str) -> DishonestyNotice:
+        """提取失信被执行人决定书"""
+        dn = DishonestyNotice(raw_text=text)
+        pat = {
+            "case_number": r"(?:案号|执行案号)[：:]?\s*([（(]\d{4}[）)][^\n]*?\d+号)",
+            "court": r"(?:执行法院|发布法院)[：:]?\s*([^\n]{4,20}(?:法院|人民法院))",
+            "dishonest_person": r"(?:失信被执行人|被执行人)[：:]?\s*([^\n,，]{4,30})",
+            "id_number": r"(?:身份证号|统一社会信用代码|组织机构代码)[：:]?\s*([^\n]{10,30})",
+            "violation": r"(?:失信情形|失信行为|具体情形)[：:]?\s*([^\n]{5,200})",
+            "publish_date": r"(?:发布日期|公布日期|列入日期)[：:]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})",
+            "legal_basis": r"(?:法律依据|依据)[：:]?\s*([^\n]{5,100})",
+        }
+        for f, p in pat.items():
+            m = re.search(p, text); 
+            if m: setattr(dn, f, m.group(1).strip())
+        return dn
+
+    def extract_credit_rating(self, text: str) -> CreditRating:
+        """提取信用评级报告"""
+        cr = CreditRating(raw_text=text)
+        pat = {
+            "rated_entity": r"(?:评级对象|受评主体|发行人)[：:]?\s*([^\n,，]{4,50})",
+            "rating_agency": r"(?:评级机构|评级公司)[：:]?\s*([^\n]{4,30})",
+            "subject_rating": r"(?:主体信用等级|主体评级)[：:]?\s*([^\n]{2,10})",
+            "bond_rating": r"(?:债项信用等级|债项评级)[：:]?\s*([^\n]{2,10})",
+            "outlook": r"(?:评级展望|展望)[：:]?\s*([^\n]{2,10})",
+            "rating_date": r"(?:评级日期|报告日期)[：:]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})",
+            "key_factors": r"(?:评级关注|主要关注|风险因素)[：:]?\s*([^\n]{10,200})",
+            "upgrade_downgrade": r"(?:评级调整|调整方向|调整幅度)[：:]?\s*([^\n]{5,50})",
+        }
+        for f, p in pat.items():
+            m = re.search(p, text); 
+            if m: setattr(cr, f, m.group(1).strip())
+        return cr
 
     # ═══════════════════════════════════════════════════════
     # 工具方法
@@ -779,6 +1008,12 @@ class QYJTWithMultimodal:
             "documents": [],
             "licenses": [],
             "court_docs": [],
+            "penalties": [],
+            "audit_opinions": [],
+            "bond_prospectuses": [],
+            "execution_rulings": [],
+            "dishonesty_notices": [],
+            "credit_ratings": [],
             "financials": [],
         }
 
@@ -791,25 +1026,74 @@ class QYJTWithMultimodal:
         # 从搜索结果中提取文件URL并处理
         all_urls = self.processor._find_urls_in_dict(result["search_results"])
 
-        for url in all_urls[:5]:
+        # 分类路由 — 将文档分派给对应的Agent角色
+        doc_route = {
+            "business_license": ("licenses", "张铁柱·企业尽调"),
+            "court_document": ("court_docs", "赵刚·风险评估"),
+            "penalty_decision": ("penalties", "赵刚·风险评估"),
+            "execution_ruling": ("execution_rulings", "赵刚·风险评估"),
+            "dishonesty_notice": ("dishonesty_notices", "赵刚·风险评估"),
+            "financial_statement": ("financials", "李明远·财务分析"),
+            "audit_opinion": ("audit_opinions", "李明远·财务分析"),
+            "bond_prospectus": ("bond_prospectuses", "王思远·行业研究"),
+            "credit_rating": ("credit_ratings", "王思远·行业研究"),
+        }
+
+        for url in all_urls[:10]:
             try:
                 doc = self.processor.process_url(url)
-                result["documents"].append({
+                st = doc.structured_data
+                dt = st.get("document_type", "unknown")
+
+                record = {
                     "url": url,
                     "type": doc.content_type.value,
+                    "document_type": dt,
                     "text_preview": doc.full_text[:500],
-                    "structured": doc.structured_data,
-                })
+                    "structured": st,
+                    "risk_signals": st.get("risk_signals", []),
+                    "assignee": doc_route.get(dt, ("documents", "郑慎之·交叉验证"))[1],
+                }
 
-                # 分类
-                st = doc.structured_data
-                if st.get("document_type") == "business_license":
-                    result["licenses"].append(st)
-                elif st.get("document_type") == "court_document":
-                    result["court_docs"].append(st)
-                elif st.get("document_type") == "financial_statement":
-                    result["financials"].append(st)
+                result["documents"].append(record)
+
+                # 自动路由到正确的角色分类
+                target_list, _ = doc_route.get(dt, ("documents", ""))
+                if target_list in result:
+                    result[target_list].append(st)
+                else:
+                    result["documents"][-1]["structured"] = st
+
             except Exception as e:
                 result["documents"].append({"url": url, "error": str(e)})
+
+        # 汇总: 生成各Agent的任务摘要
+        result["agent_assignments"] = {
+            "赵刚·风险评估": {
+                "court_cases": len(result["court_docs"]),
+                "penalties": len(result["penalties"]),
+                "executions": len(result["execution_rulings"]),
+                "dishonesty": len(result["dishonesty_notices"]),
+                "total": len(result["court_docs"]) + len(result["penalties"]) +
+                         len(result["execution_rulings"]) + len(result["dishonesty_notices"]),
+            },
+            "李明远·财务分析": {
+                "financials": len(result["financials"]),
+                "audit_opinions": len(result["audit_opinions"]),
+                "total": len(result["financials"]) + len(result["audit_opinions"]),
+            },
+            "张铁柱·企业尽调": {
+                "licenses": len(result["licenses"]),
+            },
+            "王思远·行业研究": {
+                "bond_prospectuses": len(result["bond_prospectuses"]),
+                "credit_ratings": len(result["credit_ratings"]),
+                "total": len(result["bond_prospectuses"]) + len(result["credit_ratings"]),
+            },
+            "郑慎之·交叉验证": {
+                "unrouted": sum(1 for d in result["documents"] if d.get("document_type") == "unknown"),
+                "note": "未识别的文档类型需要人工判断后分配",
+            },
+        }
 
         return result
